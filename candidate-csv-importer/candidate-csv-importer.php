@@ -46,8 +46,20 @@ class Candidate_CSV_Importer {
             return new WP_REST_Response( array( 'success' => false, 'message' => 'Name and valid email are required.' ), 400 );
         }
 
+        // Check WordPress users table
         if ( email_exists( $email ) ) {
             return new WP_REST_Response( array( 'success' => false, 'message' => "Email already exists: {$email}" ), 409 );
+        }
+
+        // Also check candidate posts by email meta (double safety)
+        $existing_candidates = get_posts( array(
+            'post_type'  => 'candidate',
+            'meta_key'   => '_candidate_email',
+            'meta_value' => $email,
+            'posts_per_page' => 1,
+        ) );
+        if ( ! empty( $existing_candidates ) ) {
+            return new WP_REST_Response( array( 'success' => false, 'message' => "Candidate profile already exists for: {$email}" ), 409 );
         }
 
         $username = sanitize_user( strtolower( explode( '@', $email )[0] ) );
@@ -58,12 +70,20 @@ class Candidate_CSV_Importer {
         $password = wp_generate_password( 12 );
         $prefix   = '_candidate_';
 
-        // Create WordPress user
+        // Split name into first/last for WordPress user meta
+        $name_parts = explode( ' ', $name, 2 );
+        $first_name = $name_parts[0];
+        $last_name  = isset( $name_parts[1] ) ? $name_parts[1] : '';
+
+        // Create WordPress user — WP Job Board Pro plugin will auto-create
+        // the candidate post via its 'user_register' hook
         $user_id = wp_insert_user( array(
             'user_login'   => $username,
             'user_email'   => $email,
             'user_pass'    => $password,
             'display_name' => $name,
+            'first_name'   => $first_name,
+            'last_name'    => $last_name,
             'role'         => 'wp_job_board_pro_candidate',
         ) );
 
@@ -71,21 +91,32 @@ class Candidate_CSV_Importer {
             return new WP_REST_Response( array( 'success' => false, 'message' => $user_id->get_error_message() ), 500 );
         }
 
-        // Create candidate post
-        $candidate_id = wp_insert_post( array(
+        // Find the candidate post auto-created by WP Job Board Pro
+        $candidate_id = get_user_meta( $user_id, 'candidate_id', true );
+
+        // If plugin didn't create one (edge case), create it ourselves
+        if ( empty( $candidate_id ) ) {
+            $candidate_id = wp_insert_post( array(
+                'post_title'   => $name,
+                'post_type'    => 'candidate',
+                'post_content' => sanitize_textarea_field( $params['description'] ?? '' ),
+                'post_status'  => 'publish',
+                'post_author'  => $user_id,
+            ) );
+            update_user_meta( $user_id, 'candidate_id', $candidate_id );
+            update_post_meta( $candidate_id, $prefix . 'user_id', $user_id );
+            update_post_meta( $candidate_id, $prefix . 'email', $email );
+            update_post_meta( $candidate_id, $prefix . 'display_name', $name );
+            update_post_meta( $candidate_id, $prefix . 'show_profile', 'show' );
+        }
+
+        // Update the candidate post with our data
+        wp_update_post( array(
+            'ID'           => $candidate_id,
             'post_title'   => $name,
-            'post_type'    => 'candidate',
             'post_content' => sanitize_textarea_field( $params['description'] ?? '' ),
-            'post_status'  => 'publish',
-            'post_author'  => $user_id,
         ) );
 
-        // Link user <-> candidate
-        update_user_meta( $user_id, 'candidate_id', $candidate_id );
-        update_post_meta( $candidate_id, $prefix . 'user_id', $user_id );
-        update_post_meta( $candidate_id, $prefix . 'email', $email );
-        update_post_meta( $candidate_id, $prefix . 'display_name', $name );
-        update_post_meta( $candidate_id, $prefix . 'show_profile', 'show' );
         update_user_meta( $user_id, 'user_account_status', 'approved' );
 
         // Optional fields
@@ -97,6 +128,24 @@ class Candidate_CSV_Importer {
         }
         if ( ! empty( $params['job_title'] ) ) {
             update_post_meta( $candidate_id, $prefix . 'job_title', sanitize_text_field( $params['job_title'] ) );
+        }
+        if ( ! empty( $params['website'] ) ) {
+            update_post_meta( $candidate_id, $prefix . 'website', esc_url_raw( $params['website'] ) );
+        }
+
+        // Extra fields (stored as custom meta)
+        $custom_prefix = '_candidate_cfield_';
+        if ( ! empty( $params['age'] ) ) {
+            update_post_meta( $candidate_id, $custom_prefix . 'age', sanitize_text_field( $params['age'] ) );
+        }
+        if ( ! empty( $params['experience_years'] ) ) {
+            update_post_meta( $candidate_id, $custom_prefix . 'experience_years', sanitize_text_field( $params['experience_years'] ) );
+        }
+        if ( ! empty( $params['languages'] ) ) {
+            update_post_meta( $candidate_id, $custom_prefix . 'languages', sanitize_text_field( $params['languages'] ) );
+        }
+        if ( ! empty( $params['contract_type'] ) ) {
+            update_post_meta( $candidate_id, $custom_prefix . 'contract_type', sanitize_text_field( $params['contract_type'] ) );
         }
 
         return new WP_REST_Response( array(
@@ -271,11 +320,17 @@ Jane Smith,jane@example.com,+0987654321,London,Designer,Creative designer,Design
             $password = ! empty( $default_password ) ? $default_password : wp_generate_password( 12 );
 
             // Step 1: Create WordPress user
+            $name_parts = explode( ' ', $name, 2 );
+            $first_name = $name_parts[0];
+            $last_name  = isset( $name_parts[1] ) ? $name_parts[1] : '';
+
             $user_id = wp_insert_user( array(
                 'user_login'   => $username,
                 'user_email'   => $email,
                 'user_pass'    => $password,
                 'display_name' => $name,
+                'first_name'   => $first_name,
+                'last_name'    => $last_name,
                 'role'         => 'wp_job_board_pro_candidate',
             ) );
 
@@ -285,27 +340,40 @@ Jane Smith,jane@example.com,+0987654321,London,Designer,Creative designer,Design
                 continue;
             }
 
-            // Step 2: Create candidate post (profile)
-            $candidate_id = wp_insert_post( array(
-                'post_title'   => $name,
-                'post_type'    => 'candidate',
-                'post_content' => sanitize_textarea_field( $data['description'] ?? '' ),
-                'post_status'  => 'publish',
-                'post_author'  => $user_id,
-            ) );
+            // Step 2: Find the candidate post auto-created by WP Job Board Pro
+            $candidate_id = get_user_meta( $user_id, 'candidate_id', true );
 
-            if ( is_wp_error( $candidate_id ) ) {
-                $errors++;
-                $messages[] = "Error creating candidate profile for {$email}";
-                continue;
+            // If plugin didn't create one (edge case), create it ourselves
+            if ( empty( $candidate_id ) ) {
+                $candidate_id = wp_insert_post( array(
+                    'post_title'   => $name,
+                    'post_type'    => 'candidate',
+                    'post_content' => sanitize_textarea_field( $data['description'] ?? '' ),
+                    'post_status'  => 'publish',
+                    'post_author'  => $user_id,
+                ) );
+
+                if ( is_wp_error( $candidate_id ) ) {
+                    $errors++;
+                    $messages[] = "Error creating candidate profile for {$email}";
+                    continue;
+                }
+
+                update_user_meta( $user_id, 'candidate_id', $candidate_id );
+                update_post_meta( $candidate_id, $prefix . 'user_id', $user_id );
+                update_post_meta( $candidate_id, $prefix . 'email', $email );
+                update_post_meta( $candidate_id, $prefix . 'display_name', $name );
+                update_post_meta( $candidate_id, $prefix . 'show_profile', 'show' );
             }
 
-            // Step 3: Link user <-> candidate
-            update_user_meta( $user_id, 'candidate_id', $candidate_id );
-            update_post_meta( $candidate_id, $prefix . 'user_id', $user_id );
-            update_post_meta( $candidate_id, $prefix . 'email', $email );
-            update_post_meta( $candidate_id, $prefix . 'display_name', $name );
-            update_post_meta( $candidate_id, $prefix . 'show_profile', 'show' );
+            // Update the candidate post with our data
+            wp_update_post( array(
+                'ID'           => $candidate_id,
+                'post_title'   => $name,
+                'post_content' => sanitize_textarea_field( $data['description'] ?? '' ),
+            ) );
+
+            // Step 3: Set account status
             update_user_meta( $user_id, 'user_account_status', 'approved' );
 
             // Step 4: Save optional fields
