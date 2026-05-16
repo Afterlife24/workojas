@@ -213,6 +213,7 @@ class Candidate_CSV_Importer {
         $valid = array(
             'Spanish', 'English', 'French', 'Polish', 'Finnish',
             'Dutch', 'Russian', 'Punjabi', 'Hindi', 'Urdu', 'Arabic',
+            'Italian', 'Ukrainian', 'Romanian', 'German',
         );
 
         $input = array_map( 'trim', explode( ',', $languages_str ) );
